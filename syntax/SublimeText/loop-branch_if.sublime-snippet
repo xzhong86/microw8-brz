@@ -8,4 +8,5 @@ loop ${1:label} {
 ]]></content>
     <tabTrigger>loopbr</tabTrigger>
     <description>Loop with branch_if</description>
+    <scope>source.curlywasm</scope>
 </snippet>

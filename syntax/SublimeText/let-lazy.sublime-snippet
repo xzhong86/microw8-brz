@@ -4,4 +4,5 @@ let lazy ${1:variable} = ${2:value};
 ]]></content>
     <tabTrigger>letlazy</tabTrigger>
     <description>Lazy variable declaration</description>
+    <scope>source.curlywasm</scope>
 </snippet>
