@@ -8,4 +8,5 @@ data ${1:address} {
 ]]></content>
     <tabTrigger>datatype</tabTrigger>
     <description>Data block definition</description>
+    <scope>source.curlywasm</scope>
 </snippet>
