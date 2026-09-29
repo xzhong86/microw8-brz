@@ -151,6 +151,10 @@ impl WindowImpl for Window {
                                     Some(VirtualKeyCode::Down) => 2,
                                     Some(VirtualKeyCode::Left) => 4,
                                     Some(VirtualKeyCode::Right) => 8,
+                                    Some(VirtualKeyCode::Z) => 16,
+                                    Some(VirtualKeyCode::X) => 32,
+                                    Some(VirtualKeyCode::A) => 64,
+                                    Some(VirtualKeyCode::S) => 128,
                                     _ => 0,
                                 },
                             }

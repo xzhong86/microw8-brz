@@ -193,7 +193,7 @@ impl super::Runtime for MicroW8 {
                 let mem = instance.memory.data_mut(&mut instance.store);
                 mem[64..68].copy_from_slice(&time.to_le_bytes());
                 mem[68..72].copy_from_slice(&input.gamepads);
-                mem[72..76].copy_from_slice(&instance.frame_counter.to_le_bytes());
+                mem[76..80].copy_from_slice(&instance.frame_counter.to_le_bytes());
             }
 
             instance.frame_counter = instance.frame_counter.wrapping_add(1);
