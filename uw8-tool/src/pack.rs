@@ -15,9 +15,15 @@ use wasmparser::{
 
 pub struct PackConfig {
     compression: Option<u8>,
+    save_id: Option<String>,
 }
 
 impl PackConfig {
+    pub fn with_save_id(mut self, id: String) -> Result<Self> {
+        crate::validate_id(&id)?;
+        self.save_id = Some(id);
+        Ok(self)
+    }
     pub fn uncompressed(mut self) -> Self {
         self.compression = None;
         self
@@ -33,6 +39,7 @@ impl Default for PackConfig {
     fn default() -> PackConfig {
         PackConfig {
             compression: Some(2),
+            save_id: None,
         }
     }
 }
@@ -50,18 +57,50 @@ pub fn pack_file(source: &Path, dest: &Path, config: &PackConfig) -> Result<()> 
 pub fn pack(data: &[u8], config: &PackConfig) -> Result<Vec<u8>> {
     let base = BaseModule::for_format_version(1)?;
 
-    let parsed_module = ParsedModule::parse(data)?;
-    let result = parsed_module.pack(&base)?;
+    let wasm = unpack(data.to_vec())?;
+    let wasm = if let Some(id) = &config.save_id {
+        crate::with_save_id(&wasm, id)?
+    } else {
+        wasm
+    };
+    let meta = crate::metadata(&wasm)?;
+    // Extension imports need explicit type/import sections. Freeze the v1 base ABI.
+    let extension = wasmparser::Parser::new(0).parse_all(&wasm).try_fold(
+        false,
+        |found, p| -> Result<bool> {
+            if let wasmparser::Payload::ImportSection(imports) = p? {
+                for import in imports {
+                    let import = import?;
+                    if import.module == "env"
+                        && matches!(
+                            import.name,
+                            "saveSize" | "saveRead" | "saveWrite" | "saveDelete"
+                        )
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(found)
+        },
+    )?;
+    let parsed_module = ParsedModule::parse(&wasm)?;
+    let result = parsed_module.pack(&base, extension)?;
+    let mut payload = Vec::new();
+    if let Some(meta) = meta {
+        payload.extend(crate::metadata::section(&meta)?);
+    }
+    payload.extend_from_slice(&result[8..]);
 
     if let Some(level) = config.compression {
         let mut uw8 = vec![2];
 
-        let content = &result[8..];
+        let content = &payload;
         let mut pb = pbr::ProgressBar::new(content.len() as u64);
         pb.set_units(pbr::Units::Bytes);
 
         uw8.extend_from_slice(&upkr::pack(
-            &result[8..],
+            &payload,
             level,
             &upkr::Config::default(),
             Some(&mut |pos| {
@@ -73,7 +112,7 @@ pub fn pack(data: &[u8], config: &PackConfig) -> Result<Vec<u8>> {
         Ok(uw8)
     } else {
         let mut uw8 = vec![1];
-        uw8.extend_from_slice(&result[8..]);
+        uw8.extend_from_slice(&payload);
         Ok(uw8)
     }
 }
@@ -87,7 +126,8 @@ pub fn unpack_file(source: &Path, dest: &Path) -> Result<()> {
 }
 
 pub fn unpack(data: Vec<u8>) -> Result<Vec<u8>> {
-    let (version, data) = match data[0] {
+    let first = *data.first().ok_or_else(|| anyhow!("Empty cartridge"))?;
+    let (version, data) = match first {
         0 => return Ok(data),
         1 => (1, data[1..].to_vec()),
         2 => (
@@ -260,12 +300,12 @@ impl<'a> ParsedModule<'a> {
         })
     }
 
-    fn pack(self, base: &BaseModule) -> Result<Vec<u8>> {
+    fn pack(self, base: &BaseModule, explicit_imports: bool) -> Result<Vec<u8>> {
         let mut module = enc::Module::new();
 
         let mut type_map = HashMap::new();
 
-        let mut uses_base_types = true;
+        let mut uses_base_types = !explicit_imports;
 
         {
             let base_type_map: HashMap<FunctionType, u32> = base

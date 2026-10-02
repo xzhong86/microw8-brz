@@ -13,3 +13,4 @@ anyhow = "1"
 pico-args = "0.5"
 upkr = { git = "https://github.com/exoticorn/upkr.git", rev = "080db40d0088bbee2bdf3c5c75288ac7853d6b7a" }
 pbr = "1"
+serde_json = "1"

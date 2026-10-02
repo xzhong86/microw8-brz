@@ -1,0 +1,30 @@
+include "../include/microw8-api.cwa"
+include "../include/microw8-save.cwa"
+
+global mut status: i32 = 0;
+global mut previous_buttons: i32 = 0;
+
+export fn start() {
+    status = saveRead(USER_MEM, 4);
+    if status == -1 { USER_MEM!0 = 0; }
+}
+
+export fn upd() {
+    let buttons = GAMEPAD!0;
+    let pressed = buttons & (buttons ^ previous_buttons);
+    previous_buttons = buttons;
+    if pressed & (1 << BUTTON_A) {
+        USER_MEM!0 = USER_MEM!0 + 1;
+        status = saveWrite(USER_MEM, 4);
+    }
+    cls(0);
+    setCursorPosition(16, 24);
+    printString(0x14010);
+    printInt(USER_MEM!0);
+    setCursorPosition(16, 48);
+    printString(0x14050);
+    printInt(status);
+}
+
+data 0x14010 { "A/Z: increment and save: " i8(0) }
+data 0x14050 { "Save result: " i8(0) }

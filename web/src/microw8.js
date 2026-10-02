@@ -1,3 +1,4 @@
+import {createSave} from './save.js';
 import loaderUrl from "data-url:../../platform/bin/loader.wasm";
 import platformUrl from "data-url:../../platform/bin/platform.uw8";
 import audioWorkletUrl from "data-url:./audiolet.js";
@@ -27,6 +28,7 @@ export default function MicroW8(screen, config = {}) {
     let cancelFunction;
     
     let currentData;
+    let currentOptions = {};
     
     let pad = 0;
     let keyboardElement = config.keyboardElement == undefined ? screen : config.keyboardElement;
@@ -61,7 +63,7 @@ export default function MicroW8(screen, config = {}) {
                     break;
                 case 'KeyR':
                     if (isKeyDown) {
-                        runModule(currentData, true);
+                        runModule(currentData, true, currentOptions);
                     }
                     break;
                 case 'F9':
@@ -94,17 +96,24 @@ export default function MicroW8(screen, config = {}) {
     let audioContext;
     let audioNode;
     
-    async function runModule(data, keepUrl) {
+    async function runModule(data, keepUrl, options = {}) {
         if (cancelFunction) {
             cancelFunction();
             cancelFunction = null;
         }
     
-        audioContext = new AudioContext({sampleRate: 44100});
+        const sessionAudioContext = new AudioContext({sampleRate: 44100});
+        const context = sessionAudioContext;
+        audioContext = context;
+        let node;
+        let save;
+        const originalCart = data;
+        currentOptions = {...options};
         let keepRunning = true;
         let abortController = new AbortController();
         cancelFunction = () => {
-            audioContext.close();
+            if (sessionAudioContext.state !== "closed") sessionAudioContext.close().catch(() => {});
+            if (save) save.close();
             keepRunning = false;
             abortController.abort();
         };
@@ -113,11 +122,14 @@ export default function MicroW8(screen, config = {}) {
     
         config.setMessage(cartridgeSize);
         if (cartridgeSize == 0) {
+            cancelFunction();
             return;
         }
     
-        await audioContext.audioWorklet.addModule(audioWorkletUrl);
-        audioNode = new AudioNode(audioContext);
+        await context.audioWorklet.addModule(audioWorkletUrl);
+        if (!keepRunning) return;
+        node = new AudioNode(context);
+        audioNode = node;
 
         let audioReadyFlags = 0;
         let audioReadyResolve;
@@ -130,13 +142,13 @@ export default function MicroW8(screen, config = {}) {
             }
         };
         let audioStateChange = () => {
-            if(audioContext.state == 'suspended') {
+            if(context.state == 'suspended') {
                 if(config.startButton) {
                     config.startButton.style = '';
                     screen.style = 'display:none';
                 }
                 (config.startButton || screen).onclick = () => {
-                    audioContext.resume();
+                    context.resume();
                 };
             } else {
                 if(config.startButton) {
@@ -146,9 +158,10 @@ export default function MicroW8(screen, config = {}) {
                 updateAudioReady(1);
             }
         };
-        audioContext.onstatechange = audioStateChange;
+        context.onstatechange = audioStateChange;
         audioStateChange();
 
+        if (!keepRunning) return;
         currentData = data;
     
         let newURL = window.location.pathname;
@@ -222,10 +235,18 @@ export default function MicroW8(screen, config = {}) {
     
             data = loadModuleData(data);
     
+            const gameModule = await WebAssembly.compile(data);
+            save = await createSave(memory, gameModule, originalCart, {
+                saveId: options.saveId ?? config.saveId,
+                profile: options.profile ?? config.profile,
+            });
+            if (!keepRunning) { save.close(); return; }
+            Object.assign(importObject.env, save.imports);
             let platform_data = await loadModuleURL(platformUrl);
+            if (!keepRunning) { save.close(); return; }
 
-            audioNode.port.onmessage = (e) => updateAudioReady(e.data);
-            audioNode.port.postMessage([platform_data, data]);
+            node.port.onmessage = (e) => updateAudioReady(e.data);
+            node.port.postMessage([platform_data, data]);
 
             let platform_instance = await instantiate(platform_data);
     
@@ -233,18 +254,19 @@ export default function MicroW8(screen, config = {}) {
                 importObject.env[name] = platform_instance.exports[name]
             }
     
-            let instance = await instantiate(data);
+            let instance = await WebAssembly.instantiate(gameModule, importObject);
     
             let buffer = U32(imageData.data.buffer);
 
             await audioReadyPromise;
+            if (!keepRunning) return;
     
             let startTime = Date.now();
             let frameCounter = 0;
     
             const timePerFrame = 1000 / 60;
 
-            audioNode.connect(audioContext.destination);
+            node.connect(context.destination);
 
             let isPaused = false;
             let pauseTime = startTime;
@@ -252,11 +274,11 @@ export default function MicroW8(screen, config = {}) {
                 let now = Date.now();
                 if(isVisible) {
                     isPaused = false;
-                    audioContext.resume();
+                    context.resume();
                     startTime += now - pauseTime;
                 } else {
                     isPaused = true;
-                    audioContext.suspend();
+                    context.suspend();
                     pauseTime = now;
                 }
             };
@@ -315,7 +337,7 @@ export default function MicroW8(screen, config = {}) {
 
                         let soundRegisters = new ArrayBuffer(32);
                         U8(soundRegisters).set(U8(memory.buffer, 80, 32));
-                        audioNode.port.postMessage({t: time, r: soundRegisters}, [soundRegisters]);
+                        node.port.postMessage({t: time, r: soundRegisters}, [soundRegisters]);
     
                         let palette = U32(memory.buffer, 0x13000, 1024);
                         for (let i = 0; i < 320 * 240; ++i) {
@@ -332,17 +354,19 @@ export default function MicroW8(screen, config = {}) {
                     let nextFrame = Math.max(thisFrame + timePerFrame, now);
     
                     if (restart) {
-                        runModule(currentData);
+                        runModule(currentData, true, currentOptions);
                     } else {
                         window.setTimeout(mainloop, nextFrame - now)
                     }
                 } catch (err) {
+                    if (save) save.close();
                     config.setMessage(cartridgeSize, err.toString());
                 }
             }
     
             mainloop();
         } catch (err) {
+            if (save) save.close();
             config.setMessage(cartridgeSize, err.toString());
         }
     }
@@ -423,7 +447,12 @@ export default function MicroW8(screen, config = {}) {
         if((type && type.includes('html')) || response.status != 200) {
             return false;
         }
-        runModule(await response.arrayBuffer(), keepUrl || devkitMode);
+        // Only the local dev-server integration opts into identity response headers.
+        const options = config.useSaveHeaders ? {
+            saveId: response.headers.get('X-UW8-Save-Id') || undefined,
+            profile: response.headers.get('X-UW8-Profile') || undefined,
+        } : {};
+        await runModule(await response.arrayBuffer(), keepUrl || devkitMode, options);
         return true;
     }
 

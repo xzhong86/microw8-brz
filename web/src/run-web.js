@@ -1,6 +1,7 @@
 import MicroW8 from './microw8.js';
 
 let uw8 = MicroW8(document.getElementById('screen'), {
+    useSaveHeaders: true,
     setMessage: (_, err) => {
         let elem = document.getElementById('message');
         if(err) {

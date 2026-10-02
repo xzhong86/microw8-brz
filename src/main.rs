@@ -36,8 +36,10 @@ fn main() -> Result<()> {
             println!();
             println!("Usage:");
             #[cfg(any(feature = "native", feature = "browser"))]
-            println!("  uw8 run [-t/--timeout <frames>] [--b/--browser] [-w/--watch] [-p/--pack] [-u/--uncompressed] [-l/--level] [-o/--output <out-file>] <file>");
-            println!("  uw8 pack [-u/--uncompressed] [-l/--level] <in-file> <out-file>");
+            println!("  uw8 run [-t/--timeout <frames>] [--b/--browser] [-w/--watch] [-p/--pack] [-u/--uncompressed] [-l/--level] [-o/--output <out-file>] [--save-id <id>] [--profile <id>] [--save-dir <dir>] <file>");
+            println!(
+                "  uw8 pack [-u/--uncompressed] [-l/--level] [--save-id <id>] <in-file> <out-file>"
+            );
             println!("  uw8 unpack <in-file> <out-file>");
             println!("  uw8 compile [-d/--debug] <in-file> <out-file>");
             println!("  uw8 filter-exports <in-wasm> <out-wasm>");
@@ -52,6 +54,15 @@ fn main() -> Result<()> {
 
 #[cfg(any(feature = "native", feature = "browser"))]
 fn run(mut args: Arguments) -> Result<()> {
+    let save_config = uw8::SaveConfig {
+        save_id: args.opt_value_from_str("--save-id")?,
+        profile: args
+            .opt_value_from_str("--profile")?
+            .unwrap_or_else(|| "default".into()),
+        directory: args
+            .opt_value_from_os_str::<_, _, bool>("--save-dir", |s| Ok(PathBuf::from(s)))?,
+    };
+    save_config.validate()?;
     let watch_mode = args.contains(["-w", "--watch"]);
     #[allow(unused)]
     let timeout: Option<u32> = args.opt_value_from_str(["-t", "--timeout"])?;
@@ -105,6 +116,7 @@ fn run(mut args: Arguments) -> Result<()> {
         #[cfg(feature = "native")]
         {
             let mut microw8 = MicroW8::new(timeout, window_config)?;
+            microw8.set_save_config(save_config.clone())?;
             if disable_audio {
                 microw8.disable_audio();
             }
@@ -114,7 +126,12 @@ fn run(mut args: Arguments) -> Result<()> {
         #[cfg(not(feature = "browser"))]
         unimplemented!();
         #[cfg(feature = "browser")]
-        Box::new(RunWebServer::new())
+        {
+            if save_config.directory.is_some() {
+                anyhow::bail!("--save-dir is only available in native mode; browser saves use browser storage");
+            }
+            Box::new(RunWebServer::with_save_config(save_config.clone())?)
+        }
     };
 
     let mut first_run = true;
@@ -262,6 +279,10 @@ fn pack(mut args: Arguments) -> Result<()> {
 
     if let Some(level) = args.opt_value_from_str(["-l", "--level"])? {
         pack_config = pack_config.with_compression_level(level);
+    }
+
+    if let Some(id) = args.opt_value_from_str::<_, String>("--save-id")? {
+        pack_config = pack_config.with_save_id(id)?;
     }
 
     let in_file = args.free_from_os_str::<PathBuf, bool>(|s| Ok(s.into()))?;

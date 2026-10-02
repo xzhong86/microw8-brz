@@ -5,5 +5,8 @@
     "@parcel/transformer-inline-string": "^2.0.0",
     "parcel": "^2.0.0"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "scripts": {
+    "build:runner": "parcel build src/run-web.html && node scripts/embed-runner.cjs"
+  }
 }

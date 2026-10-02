@@ -16,13 +16,14 @@ pub struct MicroW8 {
     engine: Engine,
     loader_module: Module,
     disable_audio: bool,
+    save_config: crate::SaveConfig,
     module_data: Option<Vec<u8>>,
     timeout: u32,
     instance: Option<UW8Instance>,
 }
 
 struct UW8Instance {
-    store: Store<()>,
+    store: Store<HostState>,
     memory: Memory,
     end_frame: TypedFunc<(), ()>,
     update: Option<TypedFunc<(), ()>>,
@@ -45,7 +46,19 @@ struct UW8WatchDog {
     stop: bool,
 }
 
+#[derive(Default)]
+struct HostState {
+    memory: Option<Memory>,
+    save: Option<crate::save::SaveStore>,
+}
+
 impl MicroW8 {
+    pub fn set_save_config(&mut self, config: crate::SaveConfig) -> Result<()> {
+        config.validate()?;
+        self.save_config = config;
+        Ok(())
+    }
+
     pub fn new(timeout: Option<u32>, window_config: WindowConfig) -> Result<MicroW8> {
         let mut config = wasmtime::Config::new();
         config.cranelift_opt_level(wasmtime::OptLevel::Speed);
@@ -65,6 +78,7 @@ impl MicroW8 {
             engine,
             loader_module,
             disable_audio: false,
+            save_config: crate::SaveConfig::default(),
             module_data: None,
             timeout: timeout.unwrap_or(0),
             instance: None,
@@ -85,7 +99,7 @@ impl super::Runtime for MicroW8 {
         self.stream = None;
         self.instance = None;
 
-        let mut store = wasmtime::Store::new(&self.engine, ());
+        let mut store = wasmtime::Store::new(&self.engine, HostState::default());
         store.set_epoch_deadline(60);
 
         let memory = wasmtime::Memory::new(&mut store, MemoryType::new(4, Some(4)))?;
@@ -97,16 +111,31 @@ impl super::Runtime for MicroW8 {
         let load_uw8 = loader_instance.get_typed_func::<i32, i32>(&mut store, "load_uw8")?;
 
         let platform_data = include_bytes!("../platform/bin/platform.uw8");
-        memory.data_mut(&mut store)[..platform_data.len()].copy_from_slice(platform_data);
+        memory.write(&mut store, 0, platform_data)?;
         let platform_length =
             load_uw8.call(&mut store, platform_data.len() as i32)? as u32 as usize;
-        let platform_module =
-            wasmtime::Module::new(&self.engine, &memory.data(&store)[..platform_length])?;
+        let platform_module = wasmtime::Module::new(
+            &self.engine,
+            memory
+                .data(&store)
+                .get(..platform_length)
+                .ok_or_else(|| anyhow!("Invalid decoded platform length"))?,
+        )?;
 
-        memory.data_mut(&mut store)[..module_data.len()].copy_from_slice(module_data);
+        memory.write(&mut store, 0, module_data)?;
         let module_length = load_uw8.call(&mut store, module_data.len() as i32)? as u32 as usize;
-        let module = wasmtime::Module::new(&self.engine, &memory.data(&store)[..module_length])?;
+        let module = wasmtime::Module::new(
+            &self.engine,
+            memory
+                .data(&store)
+                .get(..module_length)
+                .ok_or_else(|| anyhow!("Invalid decoded cartridge length"))?,
+        )?;
 
+        let wasm = memory.data(&store)[..module_length].to_vec();
+        let key = self.save_config.game_key(module_data, &wasm)?;
+        store.data_mut().memory = Some(memory);
+        store.data_mut().save = Some(crate::save::SaveStore::new(&self.save_config, key));
         add_native_functions(&mut linker, &mut store)?;
 
         let platform_instance = instantiate_platform(&mut linker, &mut store, &platform_module)?;
@@ -233,9 +262,10 @@ impl super::Runtime for MicroW8 {
 }
 
 fn add_native_functions(
-    linker: &mut wasmtime::Linker<()>,
-    store: &mut wasmtime::Store<()>,
+    linker: &mut wasmtime::Linker<HostState>,
+    store: &mut wasmtime::Store<HostState>,
 ) -> Result<()> {
+    add_save_functions(linker)?;
     linker.func_wrap("env", "acos", |v: f32| v.acos())?;
     linker.func_wrap("env", "asin", |v: f32| v.asin())?;
     linker.func_wrap("env", "atan", |v: f32| v.atan())?;
@@ -272,8 +302,8 @@ fn add_native_functions(
 }
 
 fn instantiate_platform(
-    linker: &mut wasmtime::Linker<()>,
-    store: &mut wasmtime::Store<()>,
+    linker: &mut wasmtime::Linker<HostState>,
+    store: &mut wasmtime::Store<HostState>,
     platform_module: &wasmtime::Module,
 ) -> Result<wasmtime::Instance> {
     let platform_instance = linker.instantiate(&mut *store, &platform_module)?;
@@ -310,7 +340,7 @@ fn init_sound(
     platform_module: &wasmtime::Module,
     module: &wasmtime::Module,
 ) -> Result<Uw8Sound> {
-    let mut store = wasmtime::Store::new(engine, ());
+    let mut store = wasmtime::Store::new(engine, HostState::default());
     store.set_epoch_deadline(60);
 
     let memory = wasmtime::Memory::new(&mut store, MemoryType::new(4, Some(4)))?;
@@ -624,4 +654,251 @@ fn init_sound(
     };
 
     Ok(Uw8Sound { stream, tx })
+}
+
+fn add_save_functions(linker: &mut wasmtime::Linker<HostState>) -> Result<()> {
+    use crate::save::*;
+    fn range(
+        caller: &wasmtime::Caller<'_, HostState>,
+        ptr: i32,
+        len: i32,
+    ) -> Result<std::ops::Range<usize>, i32> {
+        if len < 0 {
+            return Err(INVALID);
+        }
+        let start = ptr as u32 as usize;
+        let end = start.checked_add(len as usize).ok_or(INVALID)?;
+        let memory = caller.data().memory.ok_or(DENIED)?;
+        if end > memory.data_size(caller) {
+            return Err(INVALID);
+        }
+        Ok(start..end)
+    }
+    linker.func_wrap(
+        "env",
+        "saveSize",
+        |caller: wasmtime::Caller<'_, HostState>| -> i32 {
+            match &caller.data().save {
+                Some(save) => save.read().map(|d| d.len() as i32).unwrap_or_else(|e| e),
+                None => DENIED,
+            }
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "saveRead",
+        |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, capacity: i32| -> i32 {
+            let save = match &caller.data().save {
+                Some(s) => s,
+                None => return DENIED,
+            };
+            let r = match range(&caller, ptr, capacity) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let data = match save.read() {
+                Ok(d) => d,
+                Err(e) => return e,
+            };
+            if data.len() > r.len() {
+                return BUFFER_SMALL;
+            }
+            let memory = caller.data().memory.unwrap();
+            memory.data_mut(&mut caller)[r.start..r.start + data.len()].copy_from_slice(&data);
+            data.len() as i32
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "saveWrite",
+        |mut caller: wasmtime::Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
+            if caller.data().save.is_none() {
+                return DENIED;
+            }
+            if len <= 0 {
+                return INVALID;
+            }
+            if len as usize > MAX_SAVE {
+                return TOO_LARGE;
+            }
+            let r = match range(&caller, ptr, len) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let data = caller.data().memory.unwrap().data(&caller)[r].to_vec();
+            caller
+                .data_mut()
+                .save
+                .as_mut()
+                .unwrap()
+                .write(&data)
+                .map(|_| 0)
+                .unwrap_or_else(|e| e)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "saveDelete",
+        |mut caller: wasmtime::Caller<'_, HostState>| -> i32 {
+            match caller.data_mut().save.as_mut() {
+                Some(save) => save.delete().map(|_| 0).unwrap_or_else(|e| e),
+                None => DENIED,
+            }
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use crate::save::*;
+    fn load(
+        cart: &[u8],
+        config: &SaveConfig,
+        audio: bool,
+    ) -> (Store<HostState>, wasmtime::Instance, Memory) {
+        let engine = Engine::default();
+        let mut store = Store::new(&engine, HostState::default());
+        let memory = Memory::new(&mut store, MemoryType::new(4, Some(4))).unwrap();
+        let mut linker = wasmtime::Linker::new(&engine);
+        linker.define(&store, "env", "memory", memory).unwrap();
+        let loader = Module::new(&engine, include_bytes!("../platform/bin/loader.wasm")).unwrap();
+        let loader = linker.instantiate(&mut store, &loader).unwrap();
+        let decode = loader
+            .get_typed_func::<i32, i32>(&mut store, "load_uw8")
+            .unwrap();
+        let platform = include_bytes!("../platform/bin/platform.uw8");
+        memory.write(&mut store, 0, platform).unwrap();
+        let length = decode.call(&mut store, platform.len() as i32).unwrap() as usize;
+        let platform = Module::new(&engine, &memory.data(&store)[..length]).unwrap();
+        memory.write(&mut store, 0, cart).unwrap();
+        let length = decode.call(&mut store, cart.len() as i32).unwrap() as usize;
+        let wasm = memory.data(&store)[..length].to_vec();
+        assert_eq!(wasm, uw8_tool::unpack(cart.to_vec()).unwrap());
+        let module = Module::new(&engine, &wasm).unwrap();
+        if !audio {
+            store.data_mut().memory = Some(memory);
+            store.data_mut().save = Some(SaveStore::new(
+                config,
+                config.game_key(cart, &wasm).unwrap(),
+            ));
+        }
+        add_native_functions(&mut linker, &mut store).unwrap();
+        instantiate_platform(&mut linker, &mut store, &platform).unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+        (store, instance, memory)
+    }
+    #[test]
+    fn actual_loader_save_abi_raw_packed_and_compressed() {
+        let temp = crate::save::tests::Temp::new();
+        let cfg = temp.config();
+        let wasm = wat::parse_str(include_str!("../test/save-api.wat")).unwrap();
+        let wasm = uw8_tool::with_save_id(&wasm, "test.persistence").unwrap();
+        let variants = [
+            wasm.clone(),
+            uw8_tool::pack(&wasm, &uw8_tool::PackConfig::default().uncompressed()).unwrap(),
+            uw8_tool::pack(&wasm, &uw8_tool::PackConfig::default()).unwrap(),
+        ];
+        for cart in variants {
+            let (mut store, instance, memory) = load(&cart, &cfg, false);
+            let initial = instance
+                .get_typed_func::<(), i32>(&mut store, "initial")
+                .unwrap();
+            assert_eq!(initial.call(&mut store, ()).unwrap(), NOT_FOUND);
+            let write = instance
+                .get_typed_func::<(i32, i32), i32>(&mut store, "write")
+                .unwrap();
+            let read = instance
+                .get_typed_func::<(i32, i32), i32>(&mut store, "read")
+                .unwrap();
+            assert_eq!(write.call(&mut store, (81920, 5)).unwrap(), 0);
+            assert_eq!(read.call(&mut store, (82000, 4)).unwrap(), BUFFER_SMALL);
+            assert_eq!(read.call(&mut store, (-1, 5)).unwrap(), INVALID);
+            assert_eq!(write.call(&mut store, (81920, 65537)).unwrap(), TOO_LARGE);
+            assert_eq!(write.call(&mut store, (81920, -1)).unwrap(), INVALID);
+            assert_eq!(write.call(&mut store, (262140, 5)).unwrap(), INVALID);
+            assert_eq!(read.call(&mut store, (82000, 5)).unwrap(), 5);
+            assert_eq!(&memory.data(&store)[82000..82005], b"hello");
+            drop(store);
+            let (mut store, instance, _) = load(&cart, &cfg, false);
+            assert_eq!(
+                instance
+                    .get_typed_func::<(), i32>(&mut store, "initial")
+                    .unwrap()
+                    .call(&mut store, ())
+                    .unwrap(),
+                5
+            );
+            assert_eq!(
+                instance
+                    .get_typed_func::<(), i32>(&mut store, "delete")
+                    .unwrap()
+                    .call(&mut store, ())
+                    .unwrap(),
+                0
+            );
+            drop(store);
+            let (mut audio, instance, _) = load(&cart, &cfg, true);
+            assert_eq!(
+                instance
+                    .get_typed_func::<(), i32>(&mut audio, "initial")
+                    .unwrap()
+                    .call(&mut audio, ())
+                    .unwrap(),
+                DENIED
+            );
+            assert_eq!(
+                instance
+                    .get_typed_func::<(i32, i32), i32>(&mut audio, "write")
+                    .unwrap()
+                    .call(&mut audio, (81920, 5))
+                    .unwrap(),
+                DENIED
+            );
+        }
+    }
+    #[test]
+    fn metadata_roundtrip_repack_filter_and_old_cart() {
+        let temp = crate::save::tests::Temp::new();
+        let wasm = wat::parse_str(
+            "(module (import \"env\" \"memory\" (memory 4)) (func (export \"upd\")))",
+        )
+        .unwrap();
+        let old = uw8_tool::pack(&wasm, &uw8_tool::PackConfig::default()).unwrap();
+        let (mut store, instance, _) = load(&old, &temp.config(), false);
+        instance
+            .get_typed_func::<(), ()>(&mut store, "upd")
+            .unwrap()
+            .call(&mut store, ())
+            .unwrap();
+        let tagged = uw8_tool::pack(
+            &wasm,
+            &uw8_tool::PackConfig::default()
+                .with_save_id("stable".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let repacked =
+            uw8_tool::pack(&tagged, &uw8_tool::PackConfig::default().uncompressed()).unwrap();
+        let unpacked = uw8_tool::unpack(repacked).unwrap();
+        assert_eq!(
+            uw8_tool::metadata(&unpacked).unwrap().unwrap()["saveId"],
+            "stable"
+        );
+        std::fs::create_dir_all(&temp.0).unwrap();
+        let source = temp.0.join("in.wasm");
+        let dest = temp.0.join("out.wasm");
+        std::fs::write(&source, &unpacked).unwrap();
+        uw8_tool::filter_exports(&source, &dest).unwrap();
+        assert_eq!(
+            uw8_tool::metadata(&std::fs::read(dest).unwrap())
+                .unwrap()
+                .unwrap()["saveId"],
+            "stable"
+        );
+        let mut duplicate = unpacked.clone();
+        duplicate.extend_from_slice(&unpacked[8..]);
+        assert!(uw8_tool::metadata(&duplicate).is_err());
+    }
 }

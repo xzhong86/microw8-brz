@@ -101,3 +101,14 @@ Reads a binary WebAssembly module, removes all exports not used by the MicroW8 p
 * [Skip Ahead](https://exoticorn.github.io/microw8/v0.1pre5#AgyfpZ80wkW28kiUZ9VIK4v+RPnVxqjK1dz2BcDoNyQPsS2g4OgEzkTe6jyoAfFOmqKrS8SM2aRljBal9mjNn8i4fP9eBK+RehQKxxGtJa9FqftvqEnh3ez1YaYxqj7jgTdzJ/WAYVmKMovBT1myrX3FamqKSOgMsNedLhVTLAhQup3sNcYEjGNo8b0HZ5+AgMgCwYRGCe//XQOMAaAAzqDILgmpEZ/43RKHcQpHEQwbURfNQJpadJe2sz3q5FlQnTGXQ9oSMokidhlC+aR/IpNHieuBGLhFZ2GfnwVQ0geBbQpTPA==) (229 bytes): A port of my [TIC-80 256byte game](http://tic80.com/play?cart=1735) from LoveByte'21
 * [OhNoAnotherTunnel](https://exoticorn.github.io/microw8/v0.1pre4#Ag95rdCB5Ww5NofyQaKF4P1mrNRso4azgiem4hK99Gh8OMzSpFq3NsNDo7O7pqln10D11l9uXr/ritw7OEzKwbEfCdvaRnS2Z0Kz0iDEZt/gIqOdvFmxsL1MjPQ4XInPbUJpQUonhQq29oP2omFabnQxn0bzoK7mZjcwc5GetHG+hGajkJcRr8oOnjfCol8RD+ha33GYtPnut+GLe4ktzf5UxZwGs6oT9qqC61lRDakN) (177 bytes): A port of my [entry](http://tic80.com/play?cart=1871) in the Outline'21 bytebattle final
 * [Technotunnel](https://exoticorn.github.io/microw8/v0.1pre4#AqL8HeK1M9dn2nWNIF5vaq/Vh64pMt5nJIFoFKpBMPUsGtDtpqjo1JbT9LzPhAxCqJ7Yh4TA6oTGd4xhLowf+cWZMY73+7AZmfXJJsBi4cej/hH+4wlAgxFIrnOYnr/18IpnZbsHf0eGm1BhahX74+cVR0TRmNQmYC7GhCNS3mv/3MJn74lCj7t28aBJPjEZhP9fGXdG2u5Egh/Tjdg=) (158 bytes): A port of my [entry](https://tic80.com/play?cart=1873) in the Outline'21 bytebattle quater final
+
+## Game saves (microw8-brz)
+
+The host save API stores up to 64 KiB per game/profile without exposing the filesystem.
+See [save API, cartridge identity, storage paths and tests](docs/saves.md).
+A small interactive example is `examples/curlywas/save_counter.cwa`.
+
+```sh
+uw8 pack --save-id examples.save-counter examples/curlywas/save_counter.cwa counter.uw8
+uw8 run --profile default counter.uw8
+```

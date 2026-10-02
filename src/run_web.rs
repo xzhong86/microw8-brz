@@ -16,6 +16,10 @@ pub struct RunWebServer {
 
 impl RunWebServer {
     pub fn new() -> RunWebServer {
+        Self::with_save_config(crate::SaveConfig::default()).expect("default save config")
+    }
+    pub fn with_save_config(config: crate::SaveConfig) -> Result<RunWebServer> {
+        config.validate()?;
         let cart = Arc::new(Mutex::new(Vec::new()));
         let (tx, _) = broadcast::channel(1);
 
@@ -39,8 +43,14 @@ impl RunWebServer {
                         .body(include_str!("run-web.html"))
                 });
 
-                let cart = warp::path("cart")
-                    .map(move || server_cart.lock().map_or(Vec::new(), |c| c.clone()));
+                let cart = warp::path("cart").and(warp::path::end()).map(move || {
+                    Response::builder()
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Cache-Control", "no-store")
+                        .header("X-UW8-Profile", config.profile.as_str())
+                        .header("X-UW8-Save-Id", config.save_id.as_deref().unwrap_or(""))
+                        .body(server_cart.lock().map_or(Vec::new(), |c| c.clone()))
+                });
 
                 let events = warp::path("events").and(warp::get()).map(move || {
                     fn event_stream(
@@ -58,11 +68,11 @@ impl RunWebServer {
             });
         });
 
-        RunWebServer {
+        Ok(RunWebServer {
             cart,
             tx,
             socket_addr,
-        }
+        })
     }
 }
 

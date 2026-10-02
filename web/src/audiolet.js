@@ -1,3 +1,4 @@
+import {deniedImports} from './save.js';
 let U8 = (...a) => new Uint8Array(...a);
 class APU extends AudioWorkletProcessor {
     constructor() {
@@ -59,6 +60,7 @@ class APU extends AudioWorkletProcessor {
             importObject.env[name] = platform_instance.exports[name]
         }
 
+        Object.assign(importObject.env, deniedImports());
         let instance = await instantiate(data);
 
         this.memory = memory;

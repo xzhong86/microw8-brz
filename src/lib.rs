@@ -17,3 +17,6 @@ pub trait Runtime {
     fn load(&mut self, module_data: &[u8]) -> Result<()>;
     fn run_frame(&mut self) -> Result<()>;
 }
+
+pub mod save;
+pub use save::SaveConfig;

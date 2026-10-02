@@ -13,3 +13,6 @@ pub fn compressed_size(cart: &[u8]) -> f32 {
         upkr::compressed_size(&cart[1..]) + 1.
     }
 }
+
+mod metadata;
+pub use metadata::{metadata, validate_id, with_save_id};

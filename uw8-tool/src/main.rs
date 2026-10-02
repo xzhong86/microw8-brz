@@ -18,6 +18,9 @@ fn main() -> Result<()> {
                 if args.contains(["-u", "--uncompressed"]) {
                     config = config.uncompressed();
                 }
+                if let Some(id) = args.opt_value_from_str::<_, String>("--save-id")? {
+                    config = config.with_save_id(id)?;
+                }
                 let source: PathBuf = args.free_from_str()?;
                 let dest: PathBuf = args.free_from_str()?;
                 uw8_tool::pack_file(&source, &dest, &config)?;
@@ -56,7 +59,7 @@ fn print_help() {
     println!(
         "Usage:
     uw8-tool make-base <version>
-    uw8-tool pack <wasm file> <uw8 file>
+    uw8-tool pack [-u] [--save-id <id>] <wasm file> <uw8 file>
     uw8-tool unpack <uw8 file> <wasm file>
     uw8-tool filter-exports <wasm file> <wasm file>"
     );
